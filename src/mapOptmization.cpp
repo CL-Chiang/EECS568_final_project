@@ -1,4 +1,5 @@
 #include "utility.h"
+#include "lidar_pure_odom_factor.hpp"
 #include "lio_sam/cloud_info.h"
 #include "lio_sam/save_map.h"
 
@@ -51,6 +52,8 @@ class mapOptimization : public ParamServer
 {
 
 public:
+    // current pose
+    Pose3 current_pose;
 
     // gtsam
     NonlinearFactorGraph gtSAMgraph;
@@ -152,6 +155,9 @@ public:
     Eigen::Affine3f transPointAssociateToMap;
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
+
+    // Jacobian of good feature matching
+    map<int, Eigen::MatrixXd> jacobian;
 
 
     mapOptimization()
@@ -966,6 +972,86 @@ public:
         laserCloudSurfLastDSNum = laserCloudSurfLastDS->size();
     }
 
+    // evaluate surface jacobian
+    void evaluateFeatJacobian(const Pose3 &pose_i,
+                                const Eigen::Vector3d &point,
+                                const Eigen::Vector4d &coeff,
+                                Eigen::MatrixXd &jaco_) {
+        LidarPureOdomPlaneNormFactor f(point, coeff, 1.0);
+
+        double **param = new double *[3];
+
+        // pose pivot = Identity
+        param[0] = new double[7];
+        param[0][0] = 0.0;
+        param[0][1] = 0.0;
+        param[0][2] = 0.0;
+        param[0][3] = 0.0;
+        param[0][4] = 0.0;
+        param[0][5] = 0.0;
+        param[0][6] = 1.0;
+
+        param[1] = new double[7];
+        gtsam::Vector v = pose_i.rotation().quaternion();
+        param[1][0] = pose_i.x();
+        param[1][1] = pose_i.y();
+        param[1][2] = pose_i.z();
+        param[1][3] = v(1);
+        param[1][4] = v(2);
+        param[1][5] = v(3);
+        param[1][6] = v(0);
+
+        // extrinsic = Identity
+        param[2] = new double[7];
+        param[2][0] = 0.0;
+        param[2][1] = 0.0;
+        param[2][2] = 0.0;
+        param[2][3] = 0.0;
+        param[2][4] = 0.0;
+        param[2][5] = 0.0;
+        param[2][6] = 1.0;
+
+        double *res = new double[1];
+        double **jaco = new double *[3];
+        jaco[0] = new double[1 * 7];
+        jaco[1] = new double[1 * 7];
+        jaco[2] = new double[1 * 7];
+        f.Evaluate(param, res, jaco);
+
+        Eigen::Map<Eigen::Matrix<double, 1, 7, Eigen::RowMajor>> mat_jacobian(jaco[1]);
+        jaco_ = mat_jacobian.topLeftCorner<1, 6>();
+
+    }
+
+    void goodFeatureMatching(vector<bool> &isGoodFlag, int total_choose_num) {
+        std::priority_queue<FeatureWithScore, std::vector<FeatureWithScore>, std::less<FeatureWithScore>> heap_subset;
+        Eigen::Matrix<double, 6, 6> sub_mat_H = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
+        
+        for(int i = 0; i < isGoodFlag.size(); i++) {
+            if (isGoodFlag[i] == false) continue;
+            const Eigen::MatrixXd &jaco = jacobian[i];
+            double cur_det = logDet(sub_mat_H + jaco.transpose() * jaco, true);
+            heap_subset.push(FeatureWithScore(i, cur_det, jaco));
+        }
+        // unselect all feature with lowest score
+        int cnt = 0; 
+        while(!heap_subset.empty()) {
+            // pop if it's the first n largest element
+            if(cnt < total_choose_num) {
+                heap_subset.pop();
+                cnt++;
+            }            
+            // set others flag to false
+            else {
+                auto &fws = heap_subset.top();
+                heap_subset.pop();
+                isGoodFlag[(int)fws.idx_] = false;
+            }
+        }
+        
+        
+    }
+
     void updatePointAssociateToMap()
     {
         transPointAssociateToMap = trans2Affine3f(transformTobeMapped);
@@ -974,7 +1060,8 @@ public:
     void cornerOptimization()
     {
         updatePointAssociateToMap();
-
+        
+        int sel_num = 0;
         #pragma omp parallel for num_threads(numberOfCores)
         for (int i = 0; i < laserCloudCornerLastDSNum; i++)
         {
@@ -1057,16 +1144,27 @@ public:
                         laserCloudOriCornerVec[i] = pointOri;
                         coeffSelCornerVec[i] = coeff;
                         laserCloudOriCornerFlag[i] = true;
+                        sel_num++;
+                    }
+
+                    // If this is a valid corner feature
+                    // Then, evaluate Jacobian for good feature matching
+                    if(laserCloudOriCornerFlag[i] == true) {
+                        // Corner jacobian
+                        jacobian[i] = Eigen::Matrix<double, 1, 6>::Identity();
                     }
                 }
             }
         }
+
+        goodFeatureMatching(laserCloudOriCornerFlag, sel_num*0.8);
     }
 
     void surfOptimization()
     {
         updatePointAssociateToMap();
 
+        int sel_num = 0;
         #pragma omp parallel for num_threads(numberOfCores)
         for (int i = 0; i < laserCloudSurfLastDSNum; i++)
         {
@@ -1128,10 +1226,25 @@ public:
                         laserCloudOriSurfVec[i] = pointOri;
                         coeffSelSurfVec[i] = coeff;
                         laserCloudOriSurfFlag[i] = true;
+                        sel_num++;
+                    }
+
+                    // If this is a valid surface feature
+                    // Then, evaluate Jacobian for good feature matching
+                    if(laserCloudOriSurfFlag[i] == true) {
+                        // Corner jacobian
+                        Eigen::MatrixXd jaco_temp;
+                        const Eigen::Vector4d coeff_temp(pa, pb, pc, pd);
+                        const Eigen::Vector3d point_temp(pointOri.x, pointOri.y, pointOri.z);
+                        const Pose3 & cur_ = current_pose;
+                        evaluateFeatJacobian(cur_, point_temp, coeff_temp, jaco_temp);
+                        jacobian[i] = jaco_temp;                        
                     }
                 }
             }
         }
+
+        goodFeatureMatching(laserCloudOriSurfFlag, sel_num*0.8);
     }
 
     void combineOptimizationCoeffs()
@@ -1534,6 +1647,8 @@ public:
 
         isamCurrentEstimate = isam->calculateEstimate();
         latestEstimate = isamCurrentEstimate.at<Pose3>(isamCurrentEstimate.size()-1);
+        // update to global variable
+        current_pose = latestEstimate;
         // cout << "****************************************************" << endl;
         // isamCurrentEstimate.print("Current estimate: ");
 

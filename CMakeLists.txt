@@ -23,6 +23,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(OpenMP REQUIRED)
 find_package(PCL REQUIRED QUIET)
+find_package(Ceres REQUIRED)
 find_package(OpenCV REQUIRED QUIET)
 find_package(GTSAM REQUIRED QUIET)
 
@@ -67,6 +68,7 @@ include_directories(
 	${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 	${GTSAM_INCLUDE_DIR}
+	${CERES_INCLUDE_DIRS}
 )
 
 # link directories

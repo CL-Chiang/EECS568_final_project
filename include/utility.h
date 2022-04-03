@@ -60,6 +60,22 @@ typedef pcl::PointXYZI PointType;
 
 enum class SensorType { VELODYNE, OUSTER, LIVOX };
 
+class FeatureWithScore
+{
+public:
+    FeatureWithScore(const int &idx, const double &score, const Eigen::MatrixXd &jaco) 
+        : idx_(idx), score_(score), jaco_(jaco) {}
+
+    bool operator < (const FeatureWithScore &fws) const
+    {
+        return this->score_ < fws.score_;
+    }
+    
+    size_t idx_;
+    double score_;
+    Eigen::MatrixXd jaco_;
+};
+
 class ParamServer
 {
 public:
@@ -330,6 +346,38 @@ void imuRPY2rosRPY(sensor_msgs::Imu *thisImuMsg, T *rosRoll, T *rosPitch, T *ros
     *rosRoll = imuRoll;
     *rosPitch = imuPitch;
     *rosYaw = imuYaw;
+}
+
+template <typename MatrixType>
+inline typename MatrixType::Scalar logDet(const MatrixType &M, bool use_cholesky = false)
+{
+    using namespace Eigen;
+    typedef typename MatrixType::Scalar Scalar;
+    
+    Scalar ld = 0;
+    if (use_cholesky)
+    {
+        LLT<Matrix<Scalar, Dynamic, Dynamic>> chol(M);
+        auto &U = chol.matrixL();
+        for (unsigned i = 0; i < M.rows(); ++i)
+            ld += std::log(U(i, i)); // or ld+= std::log(prod(U.diagonal()))
+        ld *= 2;
+    }
+    else
+    {
+        PartialPivLU<Matrix<Scalar, Dynamic, Dynamic> > lu(M);
+        auto &LU = lu.matrixLU();
+        Scalar c = lu.permutationP().determinant(); // -1 or 1
+        for (unsigned i = 0; i < LU.rows(); ++i)
+        {
+            const auto &lii = LU(i, i);
+            if (lii < Scalar(0))
+                c *= -1;
+            ld += std::log(abs(lii));
+        }
+        ld += std::log(c);
+    }
+    return ld;
 }
 
 
