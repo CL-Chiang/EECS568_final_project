@@ -17,6 +17,12 @@
 #include <gtsam/inference/Symbol.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
+#include <eigen3/Eigen/Sparse>
+#include <eigen3/Eigen/Dense>
+#include <eigen3/Eigen/Geometry>
+#include <ceres/ceres.h>
+
+#include <chrono>
 
 using namespace gtsam;
 
@@ -1023,21 +1029,25 @@ public:
 
     }
 
-    void goodFeatureMatching(vector<bool> &isGoodFlag, int total_choose_num) {
+    void goodFeatureMatching(vector<bool> &isGoodFlag, const int & flag_size, const double & sel_ratio, bool isCorner) {
         std::priority_queue<FeatureWithScore, std::vector<FeatureWithScore>, std::less<FeatureWithScore>> heap_subset;
         Eigen::Matrix<double, 6, 6> sub_mat_H = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
         
-        for(int i = 0; i < isGoodFlag.size(); i++) {
+        int pre_select_num = 0;
+        for(int i = 0; i < flag_size; i++) {
             if (isGoodFlag[i] == false) continue;
+            pre_select_num++;
             const Eigen::MatrixXd &jaco = jacobian[i];
-            double cur_det = logDet(sub_mat_H + jaco.transpose() * jaco, true);
+            double cur_det = logDet(sub_mat_H + jaco.transpose() * jaco, true);            
             heap_subset.push(FeatureWithScore(i, cur_det, jaco));
         }
         // unselect all feature with lowest score
         int cnt = 0; 
+        int select_num = (int)(pre_select_num * sel_ratio);
+        
         while(!heap_subset.empty()) {
             // pop if it's the first n largest element
-            if(cnt < total_choose_num) {
+            if(cnt < select_num) {
                 heap_subset.pop();
                 cnt++;
             }            
@@ -1045,11 +1055,9 @@ public:
             else {
                 auto &fws = heap_subset.top();
                 heap_subset.pop();
-                isGoodFlag[(int)fws.idx_] = false;
+                isGoodFlag[(int)fws.idx_] = false;    
             }
         }
-        
-        
     }
 
     void updatePointAssociateToMap()
@@ -1061,7 +1069,6 @@ public:
     {
         updatePointAssociateToMap();
         
-        int sel_num = 0;
         #pragma omp parallel for num_threads(numberOfCores)
         for (int i = 0; i < laserCloudCornerLastDSNum; i++)
         {
@@ -1144,7 +1151,6 @@ public:
                         laserCloudOriCornerVec[i] = pointOri;
                         coeffSelCornerVec[i] = coeff;
                         laserCloudOriCornerFlag[i] = true;
-                        sel_num++;
                     }
 
                     // If this is a valid corner feature
@@ -1157,14 +1163,15 @@ public:
             }
         }
 
-        goodFeatureMatching(laserCloudOriCornerFlag, sel_num*0.8);
+        goodFeatureMatching(laserCloudOriCornerFlag, laserCloudCornerLastDSNum, 0.8, true);
+        
+        
     }
 
     void surfOptimization()
     {
         updatePointAssociateToMap();
 
-        int sel_num = 0;
         #pragma omp parallel for num_threads(numberOfCores)
         for (int i = 0; i < laserCloudSurfLastDSNum; i++)
         {
@@ -1226,7 +1233,6 @@ public:
                         laserCloudOriSurfVec[i] = pointOri;
                         coeffSelSurfVec[i] = coeff;
                         laserCloudOriSurfFlag[i] = true;
-                        sel_num++;
                     }
 
                     // If this is a valid surface feature
@@ -1238,13 +1244,14 @@ public:
                         const Eigen::Vector3d point_temp(pointOri.x, pointOri.y, pointOri.z);
                         const Pose3 & cur_ = current_pose;
                         evaluateFeatJacobian(cur_, point_temp, coeff_temp, jaco_temp);
-                        jacobian[i] = jaco_temp;                        
+                        jacobian[i] = jaco_temp;
                     }
                 }
             }
         }
-
-        goodFeatureMatching(laserCloudOriSurfFlag, sel_num*0.8);
+        goodFeatureMatching(laserCloudOriSurfFlag, laserCloudSurfLastDSNum, 0.8, false);
+        
+        
     }
 
     void combineOptimizationCoeffs()
@@ -1401,6 +1408,7 @@ public:
         {
             kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
+            auto t_start = std::chrono::high_resolution_clock::now();
 
             for (int iterCount = 0; iterCount < 30; iterCount++)
             {
@@ -1415,7 +1423,9 @@ public:
                 if (LMOptimization(iterCount) == true)
                     break;              
             }
-
+            auto t_end = std::chrono::high_resolution_clock::now();
+            double elapsed_time_ms = std::chrono::duration<double, std::milli>(t_end-t_start).count();
+            cout << "time difference: " <<  elapsed_time_ms  << "\n";
             transformUpdate();
         } else {
             ROS_WARN("Not enough features! Only %d edge and %d planar features available.", laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);

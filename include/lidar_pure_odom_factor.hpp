@@ -13,6 +13,9 @@
 
 #pragma once
 
+#include <cmath>
+#include <cassert>
+#include <cstring>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 
