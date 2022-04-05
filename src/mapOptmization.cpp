@@ -22,7 +22,14 @@
 #include <eigen3/Eigen/Geometry>
 #include <ceres/ceres.h>
 
+#include <numeric>  
 #include <chrono>
+#include <algorithm>
+#include <iostream>
+#include <random>
+
+#define MAX_FEATURE_SELECT_TIME 7 // 7ms
+#define MAX_RANDOM_QUEUE_TIME 10
 
 using namespace gtsam;
 
@@ -52,6 +59,52 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
                                    (double, time, time))
 
 typedef PointXYZIRPYT  PointTypePose;
+
+
+template < typename T >
+    struct RandomGeneratorInt
+    {
+        std::random_device                 random_device;
+        std::mt19937                       m_random_engine;
+        std::uniform_int_distribution< T > m_dist;
+        RandomGeneratorInt(): m_random_engine( std::random_device{}() )
+        {};
+        ~RandomGeneratorInt(){};
+
+        T geneRandUniform( T low = 0, T hight = 100 )
+        {
+            m_dist = std::uniform_int_distribution<T>(low, hight);
+            return m_dist( m_random_engine );
+        }
+
+        T *geneRandUniformArray( T low = 0, T hight = 100, size_t numbers = 100 )
+        {
+            T *res = new T[ numbers ];
+            m_dist = std::uniform_int_distribution< T >( low, hight );
+            for ( size_t i = 0; i < numbers; i++ )
+            {
+                res[ i ] = m_dist( m_random_engine );
+            }
+            return res;
+        }
+        
+        T* geneRandArrayNoRepeat( T low,  T high, T k)
+        {
+            T                  n = high - low;
+            T *                res_array = new T[ k ];
+            std::vector<T> foo;
+            foo.resize( n );
+            for ( T i = 1; i <= n; ++i ) foo[ i ] = i + low;
+            std::shuffle( foo.begin(), foo.end(), m_random_engine );
+            for ( T i = 0; i < k; ++i )
+            {
+                res_array[ i ] = foo[ i ];
+                // std::cout << foo[ i ] << " ";
+            }
+            return res_array;
+        }
+    };
+
 
 
 class mapOptimization : public ParamServer
@@ -115,6 +168,7 @@ public:
     std::vector<PointType> laserCloudOriSurfVec; // surf point holder for parallel computation
     std::vector<PointType> coeffSelSurfVec;
     std::vector<bool> laserCloudOriSurfFlag;
+    std::vector<bool> gfFlag;
 
     map<int, pair<pcl::PointCloud<PointType>, pcl::PointCloud<PointType>>> laserCloudMapContainer;
     pcl::PointCloud<PointType>::Ptr laserCloudCornerFromMap;
@@ -164,6 +218,9 @@ public:
 
     // Jacobian of good feature matching
     map<int, Eigen::MatrixXd> jacobian;
+    
+    // RandomGenerator
+    RandomGeneratorInt<size_t> rgi_;
 
 
     mapOptimization()
@@ -785,16 +842,6 @@ public:
         pubLoopConstraintEdge.publish(markerArray);
     }
 
-
-
-
-
-
-
-    
-
-
-
     void updateInitialGuess()
     {
         // save current transformation before any processing
@@ -1029,35 +1076,100 @@ public:
 
     }
 
-    void goodFeatureMatching(vector<bool> &isGoodFlag, const int & flag_size, const double & sel_ratio, bool isCorner) {
-        std::priority_queue<FeatureWithScore, std::vector<FeatureWithScore>, std::less<FeatureWithScore>> heap_subset;
+    void goodFeatureMatching(const vector<bool> &isGoodFlag, int flag_size, const double & sel_ratio, vector<bool> &gf_sel_flag, bool isCorner) 
+    {   
+        int num_all_features = (int)std::count(isGoodFlag.begin(), isGoodFlag.begin() + flag_size, true);
+        int num_use_features = num_all_features * sel_ratio;
+        std::vector<int> all_feature_idx(num_all_features);
+        std::vector<int> feature_visited(num_all_features, -1);
+
+        int size_rnd_subset = (1.0 * num_all_features / num_use_features);
         Eigen::Matrix<double, 6, 6> sub_mat_H = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
+        int num_sel_features = 0;
+
+        int num_rnd_que;
         
-        int pre_select_num = 0;
-        for(int i = 0; i < flag_size; i++) {
-            if (isGoodFlag[i] == false) continue;
-            pre_select_num++;
-            const Eigen::MatrixXd &jaco = jacobian[i];
-            double cur_det = logDet(sub_mat_H + jaco.transpose() * jaco, true);            
-            heap_subset.push(FeatureWithScore(i, cur_det, jaco));
+        // calculate time        
+        auto t_start = std::chrono::high_resolution_clock::now();
+        double elapsed_time_ms;
+        vector<bool> ori_good = isGoodFlag;
+        
+
+        // set index(isGoodFlag[index] == true) to all_feature_idx
+        int k = 0;
+        for(int i = 0; i < flag_size; i++) 
+        {
+            if(isGoodFlag[i] == true) 
+                all_feature_idx[k++]  = i;            
         }
-        // unselect all feature with lowest score
-        int cnt = 0; 
-        int select_num = (int)(pre_select_num * sel_ratio);
-        
-        while(!heap_subset.empty()) {
-            // pop if it's the first n largest element
-            if(cnt < select_num) {
-                heap_subset.pop();
-                cnt++;
+
+        while (true)
+        {
+            auto t_cur = std::chrono::high_resolution_clock::now();
+            // time used for goodFeatureMatching function
+            elapsed_time_ms = std::chrono::duration<double, std::milli>(t_cur-t_start).count();
+
+            // break if take too long or enough feature is selecated
+            if ((num_sel_features >= num_use_features) ||
+                (all_feature_idx.size() == 0) ||
+                (elapsed_time_ms > MAX_FEATURE_SELECT_TIME))
+                    break;
+
+            std::priority_queue<FeatureWithScore, std::vector<FeatureWithScore>, std::less<FeatureWithScore>> heap_subset;
+            while(true)
+            {
+                if (all_feature_idx.size() == 0) break;
+                num_rnd_que = 0;
+                size_t j;
+                while (num_rnd_que < MAX_RANDOM_QUEUE_TIME)
+                {
+                    j = rgi_.geneRandUniform(0, all_feature_idx.size() - 1);
+                    if (feature_visited[j] < int(num_sel_features))
+                    {
+                        feature_visited[j] = int(num_sel_features);
+                        break;
+                    }
+                    num_rnd_que++;
+                }
+
+                t_cur = std::chrono::high_resolution_clock::now();
+                elapsed_time_ms = std::chrono::duration<double, std::milli>(t_cur-t_start).count();
+                if (num_rnd_que >= MAX_RANDOM_QUEUE_TIME || elapsed_time_ms > MAX_FEATURE_SELECT_TIME)
+                    break;
+
+
+                int que_idx = all_feature_idx[j];
+                const Eigen::MatrixXd &jaco = jacobian[que_idx];
+                double cur_det = logDet(sub_mat_H + jaco.transpose() * jaco, true);
+                heap_subset.push(FeatureWithScore(que_idx, cur_det, jaco));
+                if (heap_subset.size() >= size_rnd_subset)
+                {
+                    const FeatureWithScore &fws = heap_subset.top();
+                    std::vector<int>::iterator iter = std::find(all_feature_idx.begin(), all_feature_idx.end(), fws.idx_);
+                    if (iter == all_feature_idx.end())
+                    {
+                        std::cerr << "odometry [goodFeatureMatching]: not exist feature idx !" << std::endl;
+                        break;
+                    }
+                    sub_mat_H += fws.jaco_.transpose() * fws.jaco_;
+
+                    size_t position = iter - all_feature_idx.begin();
+                    all_feature_idx.erase(all_feature_idx.begin() + position);
+                    feature_visited.erase(feature_visited.begin() + position);
+                    gf_sel_flag[fws.idx_] = true;
+                    //cout << "select:" << fws_idx_ << "bool:" << isGoodFlag[fws.idx_] << endl;
+                    num_sel_features++;
+                    // printf("position: %lu, num: %lu\n", position, num_rnd_que);
+                    break;
+                }
+
+                if (num_rnd_que >= MAX_RANDOM_QUEUE_TIME || elapsed_time_ms > MAX_FEATURE_SELECT_TIME)
+                    break;
+
             }            
-            // set others flag to false
-            else {
-                auto &fws = heap_subset.top();
-                heap_subset.pop();
-                isGoodFlag[(int)fws.idx_] = false;    
-            }
         }
+
+
     }
 
     void updatePointAssociateToMap()
@@ -1162,13 +1274,14 @@ public:
                 }
             }
         }
-
-        goodFeatureMatching(laserCloudOriCornerFlag, laserCloudCornerLastDSNum, 0.8, true);
+        
+        //goodFeatureMatching(laserCloudOriCornerFlag, laserCloudCornerLastDSNum, 0.8, true);
+        
         
         
     }
 
-    void surfOptimization()
+    void surfOptimization(bool isFisrtIter)
     {
         updatePointAssociateToMap();
 
@@ -1242,16 +1355,20 @@ public:
                         Eigen::MatrixXd jaco_temp;
                         const Eigen::Vector4d coeff_temp(pa, pb, pc, pd);
                         const Eigen::Vector3d point_temp(pointOri.x, pointOri.y, pointOri.z);
-                        const Pose3 & cur_ = current_pose;
+                        const Pose3 & cur_ = current_pose;                        
                         evaluateFeatJacobian(cur_, point_temp, coeff_temp, jaco_temp);
                         jacobian[i] = jaco_temp;
                     }
                 }
             }
         }
-        goodFeatureMatching(laserCloudOriSurfFlag, laserCloudSurfLastDSNum, 0.8, false);
-        
-        
+
+        if(isFisrtIter) {
+            gfFlag.resize(laserCloudSurfLastDSNum);
+            std::fill(gfFlag.begin(), gfFlag.end(), false);
+            goodFeatureMatching(laserCloudOriSurfFlag, laserCloudSurfLastDSNum, 0.8, gfFlag, false);
+        }
+
     }
 
     void combineOptimizationCoeffs()
@@ -1265,7 +1382,7 @@ public:
         }
         // combine surf coeffs
         for (int i = 0; i < laserCloudSurfLastDSNum; ++i){
-            if (laserCloudOriSurfFlag[i] == true){
+            if (laserCloudOriSurfFlag[i] == true && gfFlag[i] == true){
                 laserCloudOri->push_back(laserCloudOriSurfVec[i]);
                 coeffSel->push_back(coeffSelSurfVec[i]);
             }
@@ -1414,14 +1531,14 @@ public:
             {
                 laserCloudOri->clear();
                 coeffSel->clear();
-
+                
                 cornerOptimization();
-                surfOptimization();
+                surfOptimization((iterCount == 0));
 
                 combineOptimizationCoeffs();
 
                 if (LMOptimization(iterCount) == true)
-                    break;              
+                    break;                
             }
             auto t_end = std::chrono::high_resolution_clock::now();
             double elapsed_time_ms = std::chrono::duration<double, std::milli>(t_end-t_start).count();
