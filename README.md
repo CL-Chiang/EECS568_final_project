@@ -19,8 +19,9 @@ Steps:
 3. catkin_make under /catkin_ws
 4. Download sample datasets: see https://github.com/TixiaoShan/LIO-SAM
 5. Run packages & play bag files(dataset):
+```
     roslaunch lio_sam run.launch
     rosbag play your-bag.bag -r 3
-    
+```   
 I've modified extrinsic and some related parameters in paras.yaml to fit KITTI dataset.
 For other dataset, see the original git wesite.
