@@ -1,17 +1,17 @@
 Steps:
 1. Install packages:
     ROS (tested with Kinetic and Melodic)
-    
+```    
         sudo apt-get install ros-noetic-navigation
         sudo apt-get install ros-noetic-robot-localization
         sudo apt-get install ros-noetic-robot-state-publisher
-        
+```        
     gtsam (Georgia Tech Smoothing and Mapping library)
-    
+```    
         sudo add-apt-repository ppa:borglab/gtsam-release-4.0
         sudo apt update
         sudo apt install libgtsam-dev libgtsam-unstable-dev
-        
+```        
     ceres
         http://ceres-solver.org/installation.html        
         
