@@ -8,6 +8,9 @@ Steps:
         sudo add-apt-repository ppa:borglab/gtsam-release-4.0
         sudo apt update
         sudo apt install libgtsam-dev libgtsam-unstable-dev
+    ceres
+        http://ceres-solver.org/installation.html        
+        
 2. git clone under /catkin_ws/src
 3. catkin_make under /catkin_ws
 4. Download sample datasets: see https://github.com/TixiaoShan/LIO-SAM
