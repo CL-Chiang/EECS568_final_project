@@ -24,5 +24,6 @@ Steps:
     roslaunch lio_sam run.launch
     rosbag play your-bag.bag -r 3
 ```   
+Note: If the simulation is lagging, reduce the playback time from 3 to 1 or 2
 I've modified extrinsic and some related parameters in paras.yaml to fit KITTI dataset.
 For other dataset, see the original git wesite.
