@@ -26,5 +26,7 @@ Steps:
 ```   
 Note: If the simulation is lagging, reduce the playback time from 3 to 1 or 2
 
-I've modified extrinsic and some related parameters in paras.yaml to fit KITTI dataset.
-For other dataset, see the original git wesite.
+The parameters in paras.yaml are modified to fit the KITTI dataset.
+For other dataset, see the original git website. 
+
+For the Scan Context LIO SAM, please change the branch accordingly. The Scan Context evaluation is based on the framework of https://github.com/gisbi-kim/SC-LIO-SAM
